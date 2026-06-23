@@ -1,18 +1,20 @@
 // ============================================
 // ФАЙЛ: lib/field/grid_field.dart
-// ЧАСТЬ ПЛАНА: 2.6 — Подключение состояния к полю
-// ЧТО ДЕЛАЕТ: интерактивная сетка с состоянием через Riverpod
+// ЧАСТЬ ПЛАНА: 2.8 — Undo/redo, панель инструментов
+// ЧТО ДЕЛАЕТ: интерактивная сетка с состоянием, историей и клавишами
 // ЗАВИСИТ ОТ: grid_controller.dart, grid_painter.dart, слои, state
 // ============================================
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/constants.dart';
 import '../core/math_model/math_point.dart';
 import '../core/math_model/point_object.dart';
 import '../state/field_state.dart';
+import '../state/history_state.dart';
 import '../state/tool_state.dart';
 import 'grid_controller.dart';
 import 'grid_painter.dart';
@@ -20,6 +22,7 @@ import 'grid_settings.dart';
 import 'layers/annotations_layer.dart';
 import 'layers/interaction_layer.dart';
 import 'layers/objects_layer.dart';
+import 'tool_panel.dart';
 
 class GridField extends ConsumerStatefulWidget {
   final GridSettings? settings;
@@ -50,6 +53,25 @@ class _GridFieldState extends ConsumerState<GridField> {
     super.dispose();
   }
 
+  // Ctrl+Z / Ctrl+Y — undo/redo
+  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    final isCtrl = HardwareKeyboard.instance.isControlPressed;
+    if (!isCtrl) return KeyEventResult.ignored;
+
+    if (event.logicalKey == LogicalKeyboardKey.keyZ) {
+      ref.read(historyProvider.notifier).undo();
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.keyY) {
+      ref.read(historyProvider.notifier).redo();
+      return KeyEventResult.handled;
+    }
+
+    return KeyEventResult.ignored;
+  }
+
   // Колёсико мыши — зум
   void _onPointerSignal(PointerSignalEvent event) {
     if (event is PointerScrollEvent) {
@@ -77,27 +99,22 @@ class _GridFieldState extends ConsumerState<GridField> {
   // Тап по полю — поведение зависит от активного инструмента
   void _onTapDown(TapDownDetails details) {
     final activeTool = ref.read(activeToolProvider);
-
     if (activeTool == ActiveTool.point) {
       _placePoint(details.localPosition);
     }
   }
 
-  // Поставить точку в позиции тапа
+  // Поставить точку через команду (undo/redo поддерживается)
   void _placePoint(Offset screenPos) {
     var fieldPos = _controller.screenToField(screenPos);
 
-    // Привязка к узлу сетки если включена
     if (_controller.settings.snapToGrid) {
       fieldPos = _controller.snapToGrid(fieldPos);
     }
 
-    // Следующая буква метки: A, B, C... по числу уже существующих точек
-    final existingPoints = ref
-        .read(fieldProvider)
-        .objects
-        .whereType<PointObject>()
-        .length;
+    // Метка A, B, C... по числу уже существующих точек
+    final existingPoints =
+        ref.read(fieldProvider).objects.whereType<PointObject>().length;
     final label = existingPoints < 26
         ? String.fromCharCode('A'.codeUnitAt(0) + existingPoints)
         : 'P$existingPoints';
@@ -106,15 +123,14 @@ class _GridFieldState extends ConsumerState<GridField> {
       point: MathPoint(x: fieldPos.dx, y: fieldPos.dy, label: label),
     );
 
-    ref.read(fieldProvider.notifier).addObject(obj);
+    // Через историю — чтобы Ctrl+Z мог отменить
+    ref.read(historyProvider.notifier).execute(AddObjectCommand(obj));
   }
 
   @override
   Widget build(BuildContext context) {
     final fieldState = ref.watch(fieldProvider);
-    final activeTool = ref.watch(activeToolProvider);
 
-    // Находим выделенный объект для InteractionLayer
     final selected = fieldState.selectedObjectId != null
         ? fieldState.objects
             .where((o) => o.id == fieldState.selectedObjectId)
@@ -132,157 +148,91 @@ class _GridFieldState extends ConsumerState<GridField> {
           });
         }
 
-        return Listener(
-          onPointerSignal: _onPointerSignal,
-          child: GestureDetector(
-            onScaleStart: _onScaleStart,
-            onScaleUpdate: _onScaleUpdate,
-            onTapDown: _onTapDown,
-            child: Stack(
-              children: [
-                // Слой 0 — сетка
-                SizedBox.expand(
-                  child: AnimatedBuilder(
-                    animation: _controller,
-                    builder: (context, _) => CustomPaint(
-                      painter: GridPainter(controller: _controller),
+        // Focus — чтобы ловить Ctrl+Z / Ctrl+Y
+        return Focus(
+          autofocus: true,
+          onKeyEvent: _onKeyEvent,
+          child: Listener(
+            onPointerSignal: _onPointerSignal,
+            child: GestureDetector(
+              onScaleStart: _onScaleStart,
+              onScaleUpdate: _onScaleUpdate,
+              onTapDown: _onTapDown,
+              child: Stack(
+                children: [
+                  // Слой 0 — сетка
+                  SizedBox.expand(
+                    child: AnimatedBuilder(
+                      animation: _controller,
+                      builder: (context, _) => CustomPaint(
+                        painter: GridPainter(controller: _controller),
+                      ),
                     ),
                   ),
-                ),
 
-                // Слой 1 — объекты
-                SizedBox.expand(
-                  child: AnimatedBuilder(
-                    animation: _controller,
-                    builder: (context, _) => CustomPaint(
-                      painter: ObjectsLayer(
+                  // Слой 1 — объекты
+                  SizedBox.expand(
+                    child: AnimatedBuilder(
+                      animation: _controller,
+                      builder: (context, _) => CustomPaint(
+                        painter: ObjectsLayer(
+                          objects: fieldState.objects,
+                          controller: _controller,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  // Слой 2 — аннотации
+                  SizedBox.expand(
+                    child: CustomPaint(
+                      painter: AnnotationsLayer(
                         objects: fieldState.objects,
                         controller: _controller,
                       ),
                     ),
                   ),
-                ),
 
-                // Слой 2 — аннотации
-                SizedBox.expand(
-                  child: CustomPaint(
-                    painter: AnnotationsLayer(
-                      objects: fieldState.objects,
-                      controller: _controller,
-                    ),
-                  ),
-                ),
-
-                // Слой 3 — интерактив
-                SizedBox.expand(
-                  child: AnimatedBuilder(
-                    animation: _controller,
-                    builder: (context, _) => CustomPaint(
-                      painter: InteractionLayer(
-                        controller: _controller,
-                        selectedObject: selected,
+                  // Слой 3 — интерактив
+                  SizedBox.expand(
+                    child: AnimatedBuilder(
+                      animation: _controller,
+                      builder: (context, _) => CustomPaint(
+                        painter: InteractionLayer(
+                          controller: _controller,
+                          selectedObject: selected,
+                        ),
                       ),
                     ),
                   ),
-                ),
 
-                // Временная панель инструментов для тестирования
-                Positioned(
-                  top: 12,
-                  left: 12,
-                  child: _ToolBar(activeTool: activeTool),
-                ),
-
-                // Кнопка сброса вида
-                Positioned(
-                  right: 16,
-                  bottom: 16,
-                  child: FloatingActionButton.small(
-                    onPressed: () => _controller.centerOn(size),
-                    tooltip: 'Сбросить вид',
-                    child: const Icon(Icons.home_outlined),
+                  // Панель инструментов слева
+                  const Positioned(
+                    left: 0,
+                    top: 0,
+                    bottom: 0,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: ToolPanel(),
+                    ),
                   ),
-                ),
-              ],
+
+                  // Кнопка сброса вида
+                  Positioned(
+                    right: 16,
+                    bottom: 16,
+                    child: FloatingActionButton.small(
+                      onPressed: () => _controller.centerOn(size),
+                      tooltip: 'Сбросить вид',
+                      child: const Icon(Icons.home_outlined),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         );
       },
-    );
-  }
-}
-
-// Временная панель инструментов — для тестирования постановки точек
-class _ToolBar extends ConsumerWidget {
-  final ActiveTool activeTool;
-
-  const _ToolBar({required this.activeTool});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return Card(
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _ToolButton(
-            icon: Icons.near_me,
-            label: 'Select',
-            active: activeTool == ActiveTool.select,
-            onTap: () => ref.read(activeToolProvider.notifier).state =
-                ActiveTool.select,
-          ),
-          _ToolButton(
-            icon: Icons.circle,
-            label: 'Point',
-            active: activeTool == ActiveTool.point,
-            onTap: () => ref.read(activeToolProvider.notifier).state =
-                ActiveTool.point,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ToolButton extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool active;
-  final VoidCallback onTap;
-
-  const _ToolButton({
-    required this.icon,
-    required this.label,
-    required this.active,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              size: 20,
-              color: active ? kColorPoint : Colors.grey,
-            ),
-            const SizedBox(height: 2),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 10,
-                color: active ? kColorPoint : Colors.grey,
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
