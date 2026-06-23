@@ -13,10 +13,10 @@ import 'package:flutter/material.dart';
 const double kCellSize = 40.0;
 
 /// Минимальный масштаб (отдалить)
-const double kZoomMin = 0.25;
+const double kZoomMin = 0.1;
 
 /// Максимальный масштаб (приблизить)
-const double kZoomMax = 8.0;
+const double kZoomMax = 20.0;
 
 /// Масштаб по умолчанию
 const double kZoomDefault = 1.0;

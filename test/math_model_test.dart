@@ -135,11 +135,11 @@ void main() {
     });
 
     test('type: равносторонний треугольник определяется верно', () {
-      final side = 2.0;
+      const side = 2.0;
       final h = side * sqrt(3) / 2;
       final equilateral = Triangle(
-        pointA: MathPoint(x: 0, y: 0),
-        pointB: MathPoint(x: side, y: 0),
+        pointA: const MathPoint(x: 0, y: 0),
+        pointB: const MathPoint(x: side, y: 0),
         pointC: MathPoint(x: side / 2, y: h),
       );
       expect(equilateral.type(), equals('равносторонний'));
